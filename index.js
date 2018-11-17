@@ -9,78 +9,106 @@ Parse.serverURL = '';
 Parse.masterKey = '';
 
 exports.handler = (event, context, callback) => {
-    const instructorCommissionQuery = new Parse.Query(Parse.Object.extend('InstructorCommission'));
+    const affiliateCommissionQuery = new Parse.Query(Parse.Object.extend('AffiliateCommission'));
+    const secondTierAffiliateCommissionQuery = new Parse.Query(Parse.Object.extend('SecondTierAffiliateCommission'));
+    
     const lastPayoutCutoff = new Date();
-    lastPayoutCutoff.setDate(lastPayoutCutoff.getDate() - 9);
+    lastPayoutCutoff.setDate(lastPayoutCutoff.getDate() - 60);
     const currentPayoutCutoff = new Date();
-    currentPayoutCutoff.setDate(currentPayoutCutoff.getDate() - 2);
-    instructorCommissionQuery.greaterThanOrEqualTo('createdAt', lastPayoutCutoff);
-    instructorCommissionQuery.lessThan('createdAt', currentPayoutCutoff);
-    instructorCommissionQuery.include('instructor');
-    instructorCommissionQuery.find().then(instructorCommissions => {
-        
-        const payoutsByInstructors = getPayouts(instructorCommissions, "instructor");
-        console.log('payout data' + JSON.stringify(payoutsByInstructors));
-        
-        let paypalPayoutFormat = '';
-        payoutsByInstructors.forEach(instructorPayout => {
-            const amount = instructorPayout.amount / 100;
-            paypalPayoutFormat = paypalPayoutFormat + '' + instructorPayout.paypal + ',' + amount + ',USD,' + instructorPayout.instructorId + ',' +instructorPayout.instructorCommissionIds +'\n';
-        });
-        
-        console.log('PAYPAL FORM ' + paypalPayoutFormat);
+    currentPayoutCutoff.setDate(currentPayoutCutoff.getDate() - 30);
+    affiliateCommissionQuery.greaterThanOrEqualTo('createdAt', lastPayoutCutoff);
+    affiliateCommissionQuery.lessThan('createdAt', currentPayoutCutoff);
+    affiliateCommissionQuery.include('instructor');
+    affiliateCommissionQuery.include('ambassador');
+    
+    secondTierAffiliateCommissionQuery.greaterThanOrEqualTo('createdAt', lastPayoutCutoff);
+    secondTierAffiliateCommissionQuery.lessThan('createdAt', currentPayoutCutoff);
+    secondTierAffiliateCommissionQuery.include('instructor');
+    secondTierAffiliateCommissionQuery.include('ambassador');
+    
+    
+    affiliateCommissionQuery.find().then(affiliateCommissions => {
+        secondTierAffiliateCommissionQuery.find().then(secondTierCommissions => {
+            const allAffiliateCommissions = affiliateCommissions.concat(secondTierCommissions);
+            const payoutsByAffiliates = getPayouts(allAffiliateCommissions);
 
-        fs.writeFile('/tmp/payout.txt', paypalPayoutFormat, 'utf8', function (err) {
-          if (err) {
-            console.log('Some error occured - file either not saved or corrupted file saved.');
-            callback(err);
-          } else{
-            let fileStream = fs.createReadStream("/tmp/payout.txt");
-            fileStream.on('error', function(err) {
-                console.log('File Error', err);
+            let paypalPayoutFormat = '';
+            payoutsByAffiliates.forEach(payout => {
+                let userInfo = '';
+                if(payout.instructorId){ userInfo = 'instructor::' + payout.instructorId; }
+                if(payout.ambassadorId){ userInfo = 'ambassador::' + payout.ambassadorId; }
+                const amount = payout.amount / 100;
+                paypalPayoutFormat = paypalPayoutFormat + '' + payout.paypal + ',' + amount + ',USD,' + userInfo + ',' + payout.affiliateCommissionIds +'\n';
             });
-            var params = {
-                Bucket : 'ywctw-payouts',
-                Key : Date.now()+'::instructorPayout.csv',
-                Body : fileStream
-            };
-            s3.putObject(params, function(err, data) {
-                if (err) console.log('write err', err, err.stack);
-                else  {
-                    console.log('s3 upload response' + JSON.stringify(data));
-                    const response = {
-                        statusCode: 200,
-                        body: paypalPayoutFormat
-                    };
-                    callback(null, response);
-                }
+            
+            console.log('PAYPAL FORM ' + paypalPayoutFormat);
+    
+            fs.writeFile('/tmp/payout.txt', paypalPayoutFormat, 'utf8', function (err) {
+              if (err) {
+                console.log('Some error occured - file either not saved or corrupted file saved.');
+                callback(err);
+              } else {
+                let fileStream = fs.createReadStream("/tmp/payout.txt");
+                fileStream.on('error', function(err) {
+                    console.log('File Error', err);
+                });
+                var params = { 
+                    Bucket : 'ywctw-payouts',
+                    Key : Date.now()+'::affiliatePayout.csv',
+                    Body : fileStream
+                };
+                s3.putObject(params, function(err, data) {
+                    if (err) console.log('write err', err, err.stack);
+                    else  {
+                        console.log('s3 upload response' + JSON.stringify(data));
+                        const response = {
+                            statusCode: 200,
+                            body: paypalPayoutFormat
+                        };
+                        callback(null, response);
+                    }
+                });
+              }
             });
-          }
-        });
-    }, error => {
-        callback('err :: ' + JSON.stringify(error));
-    });
+            }, error => {
+                callback('error :: ' + JSON.stringify(error));
+            });
+        }, err => {
+            callback('err ::' + JSON.stringify(err));
+        }
+    );
 };
 
-function getPayouts(arr, prop){
+function getPayouts(arr){
     const payouts = [];
     for (let i = 0; i < arr.length; i++) {
-        console.log('arr prop ::' + arr[i].get(prop).id);
-        let foundInstructor = false;
+        let foundAffiliate = false;
         payouts.forEach(payout => {
-            if(payout.instructorId == arr[i].get(prop).id){
+            const payoutPaypal = arr[i].get('instructor') ? arr[i].get('instructor').get('paypal') : arr[i].get('ambassador').get('paypal');
+            if(payout.paypal == payoutPaypal){
                 payout.amount = payout.amount + arr[i].get('amount');
-                payout.instructorCommissionIds = payout.instructorCommissionIds + ' :: ' + arr[i].id;
-                foundInstructor = true;
+                payout.affiliateCommissionIds = payout.affiliateCommissionIds + ' :: ' + arr[i].id;
+                foundAffiliate = true;
             }
         });
-        if(!foundInstructor){
-            payouts.push({
-                instructorId: arr[i].get(prop).id,
-                paypal:  (arr[i].get(prop).get('paypal') || 'youremail@email.com'),
-                amount: 0 + arr[i].get('amount'),
-                instructorCommissionIds: ''+arr[i].id
-            });
+        if(!foundAffiliate){
+            if(arr[i].get('instructor')){
+                payouts.push({
+                    instructorId: arr[i].get('instructor').id,
+                    paypal:  (arr[i].get('instructor').get('paypal') || 'email@youremail.com'),
+                    amount: 0 + arr[i].get('amount'),
+                    affiliateCommissionIds: ''+arr[i].id
+                });
+            }
+            if(arr[i].get('ambassador')){
+                payouts.push({
+                    ambassadorId: arr[i].get('ambassador').id,
+                    paypal:  (arr[i].get('ambassador').get('paypal') || 'email@youremail.com'),
+                    amount: 0 + arr[i].get('amount'),
+                    affiliateCommissionIds: ''+arr[i].id
+                });
+            }
+
         }
     }
     return payouts;
