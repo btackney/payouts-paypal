@@ -1,4 +1,4 @@
-# payouts-paypal
+# payouts-paypal-aws
 Generates paypal payouts .csv file and saves in s3 based on db records, use with lambda &amp; cloud watch events scheduled expressions.
 
 Scheduled Expression(Runs 15th of Month at 10AM): cron(0 10 15 * ? *)
